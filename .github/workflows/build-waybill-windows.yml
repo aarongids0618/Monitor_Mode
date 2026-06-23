@@ -1,0 +1,71 @@
+name: Build Waybill Printer Windows
+
+on:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+
+    steps:
+      - name: Check out temporary build branch
+        uses: actions/checkout@v4
+
+      - name: Reassemble application source
+        shell: pwsh
+        run: |
+          $parts = Get-ChildItem waybill-build/source.part* | Sort-Object Name
+          $joined = foreach ($part in $parts) { Get-Content $part.FullName -Raw }
+          $base64 = ($joined -join '') -replace '\s',''
+          [IO.File]::WriteAllBytes("$env:GITHUB_WORKSPACE\waybill-source.zip", [Convert]::FromBase64String($base64))
+          New-Item -ItemType Directory -Force -Path app | Out-Null
+          Expand-Archive waybill-source.zip app -Force
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        working-directory: app
+        run: npm install --no-audit --no-fund
+
+      - name: Validate source
+        working-directory: app
+        run: npm run validate
+
+      - name: Build Windows packages
+        working-directory: app
+        run: npm run build:win
+
+      - name: Generate SHA-256 checksums
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem app/dist -File | Where-Object { $_.Extension -in '.exe', '.zip', '.yml', '.blockmap' }
+          $lines = foreach ($file in $files) {
+            $hash = (Get-FileHash -Algorithm SHA256 $file.FullName).Hash.ToLowerInvariant()
+            "$hash  $($file.Name)"
+          }
+          Set-Content -Path app/dist/SHA256SUMS.txt -Value $lines -Encoding ascii
+
+      - name: Upload Windows packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: Waybill-Printer-Windows-2.2.0
+          path: |
+            app/dist/*.exe
+            app/dist/*.zip
+            app/dist/*.yml
+            app/dist/*.blockmap
+            app/dist/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 7
